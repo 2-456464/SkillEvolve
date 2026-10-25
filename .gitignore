@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+runs/
+.venv/
+dist/
+.idea/
+.tmp_ds/
+_tmp_patch.py

@@ -1,0 +1,3 @@
+# SkillEvolve-CR 后端依赖
+# Python 3.11+（标准库含 tomllib），仅以下第三方包：
+pyyaml>=6.0

@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkillEvolve-CR · 三轮自优化执行链路</title>
+<style>
+  :root {
+    --brand: #6366f1; --review: #3b82f6; --score: #10b981; --metric: #d97706;
+    --opt: #8b5cf6; --guard: #f59e0b; --prod: #64748b;
+    --ink: #1e293b; --sub: #64748b; --line: #e2e8f0; --bg: #f8fafc;
+    --sh: 0 1px 2px rgba(16,24,40,.05), 0 4px 14px rgba(16,24,40,.06);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Inter","PingFang SC","Microsoft YaHei",system-ui,sans-serif; background: var(--bg); color: var(--ink); padding: 32px 20px 60px; }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 22px; letter-spacing: .2px; }
+  .subhead { color: var(--sub); font-size: 13.5px; margin: 6px 0 18px; line-height: 1.7; }
+  .legend { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 22px; }
+  .lg { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--sub); background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .sec { margin-bottom: 26px; }
+  .sec-title { font-size: 15px; font-weight: 700; margin-bottom: 12px; padding-left: 10px; border-left: 3px solid var(--brand); }
+  .sec-title small { color: var(--sub); font-weight: 500; margin-left: 8px; }
+  /* 流程节点 */
+  .row { display: flex; align-items: stretch; gap: 0; flex-wrap: nowrap; }
+  .node { background: #fff; border: 1.5px solid var(--line); border-radius: 12px; padding: 10px 14px; box-shadow: var(--sh); flex: 1; min-width: 0; }
+  .node b { display: block; font-size: 13.5px; margin-bottom: 3px; }
+  .node small { color: var(--sub); font-size: 12px; line-height: 1.55; display: block; }
+  .node .code { font-family: ui-monospace,Consolas,monospace; font-size: 11.5px; background: #f1f5f9; border-radius: 5px; padding: 1px 6px; color: #475569; }
+  .node.c-trigger { border-color: var(--brand); }
+  .node.c-trigger b { color: var(--brand); }
+  .node.c-review { border-top: 3px solid var(--review); }
+  .node.c-score { border-top: 3px solid var(--score); }
+  .node.c-metric { border-top: 3px solid var(--metric); }
+  .node.c-opt { border-top: 3px solid var(--opt); }
+  .node.c-guard { border-color: #fcd34d; background: #fffbeb; }
+  .node.c-guard b { color: #b45309; }
+  .node.c-prod { border-style: dashed; background: #fcfdfe; }
+  .arr { display: flex; align-items: center; padding: 0 6px; color: #94a3b8; font-size: 16px; flex: none; }
+  .arr::before { content: ""; width: 14px; height: 2px; background: #cbd5e1; }
+  .arr::after { content: ""; border: 5px solid transparent; border-left: 7px solid #cbd5e1; border-right: 0; }
+  /* 往下箭头 */
+  .down { display: flex; flex-direction: column; align-items: center; color: #94a3b8; margin: 4px 0; }
+  .down::before { content: ""; width: 2px; height: 12px; background: #cbd5e1; }
+  .down::after { content: ""; border: 6px solid transparent; border-top: 8px solid #cbd5e1; border-bottom: 0; }
+  .down span { font-size: 11.5px; color: var(--sub); background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; margin: 2px 0; }
+  /* Round 大卡 */
+  .round-card { background: #fff; border: 1.5px solid var(--line); border-radius: 14px; box-shadow: var(--sh); padding: 16px; }
+  .round-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .round-head b { font-size: 15px; color: var(--brand); }
+  .round-head small { color: var(--sub); font-size: 12.5px; }
+  .stage3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .stage3 .node { min-height: 96px; }
+  /* 决策与护栏 */
+  .decision { margin-top: 12px; padding: 10px 14px; border-radius: 10px; background: #fffbeb; border: 1.5px dashed #f59e0b; font-size: 13px; }
+  .decision b { color: #b45309; }
+  .branch3 { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 10px; margin-top: 10px; }
+  .branch3 .node { border-radius: 10px; }
+  .b-bad { border-color: #fecaca; background: #fef2f2; } .b-bad b { color: #b91c1c; }
+  .b-ok { border-color: #a7f3d0; background: #ecfdf5; } .b-ok b { color: #047857; }
+  .b-warn { border-color: #fde68a; background: #fffbeb; } .b-warn b { color: #b45309; }
+  /* 时间线 */
+  .tl3 { display: flex; align-items: stretch; gap: 0; }
+  .tl3 .r { flex: 1; background: #fff; border: 1.5px solid var(--line); border-radius: 12px; padding: 10px 12px; box-shadow: var(--sh); }
+  .tl3 .r b { font-size: 13px; } .tl3 .r small { display:block; color: var(--sub); font-size: 11.5px; margin-top: 2px; line-height: 1.5; }
+  .tl3 .opt { flex: .9; border-color: #ddd6fe; background: #f5f3ff; }
+  .tl3 .opt b { color: var(--opt); }
+  .tree { font-family: ui-monospace,Consolas,monospace; font-size: 12px; color: var(--sub); background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; line-height: 1.8; box-shadow: var(--sh); }
+  .tree .hl { color: var(--brand); font-weight: 700; }
+  .foot { text-align: center; color: #94a3b8; font-size: 12px; margin-top: 28px; }
+  @media (max-width: 900px) {
+    .row, .tl3 { flex-direction: column; }
+    .arr { transform: rotate(90deg); justify-content: center; padding: 4px 0; }
+    .stage3, .branch3 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SkillEvolve-CR · 三轮自优化执行链路</h1>
+  <div class="subhead">从你在页面点下「多轮优化 · 3 轮」那一刻开始，后台真实发生的全部步骤。链路对 3 轮通用：每轮结构完全相同，轮次间仅 SKILL 版本可能不同。</div>
+  <div class="legend">
+    <span class="lg"><i class="dot" style="background:var(--brand)"></i>触发/编排</span>
+    <span class="lg"><i class="dot" style="background:var(--review)"></i>① 检视生成（headless）</span>
+    <span class="lg"><i class="dot" style="background:var(--score)"></i>② 评分（headless）</span>
+    <span class="lg"><i class="dot" style="background:var(--metric)"></i>③ 指标汇总（Python）</span>
+    <span class="lg"><i class="dot" style="background:var(--opt)"></i>④ SKILL 优化（headless）</span>
+    <span class="lg"><i class="dot" style="background:var(--guard)"></i>闭环护栏</span>
+    <span class="lg"><i class="dot" style="background:var(--prod)"></i>产物落盘</span>
+  </div>
+
+  <!-- 0 触发 -->
+  <div class="sec">
+    <div class="sec-title">0 · 触发链路 <small>页面点击 → 后台子进程</small></div>
+    <div class="row">
+      <div class="node c-trigger"><b>你：勾选案例，点「多轮优化 · 3 轮」</b><small>可选起始 SKILL（main / baseline / weak）</small></div>
+      <div class="arr"></div>
+      <div class="node"><b>前端 <span class="code">POST /api/run</span></b><small>payload：rounds=3 · cases=[…] · start_skill</small></div>
+      <div class="arr"></div>
+      <div class="node"><b>服务端 RunManager</b><small>运行互斥校验 → 派生后台子进程（页面变「运行中」）</small></div>
+      <div class="arr"></div>
+      <div class="node"><b><span class="code">python -m skillevolve run --rounds 3</span></b><small>命令行直跑此命令完全等价</small></div>
+    </div>
+  </div>
+  <div class="down"></div>
+
+  <!-- 1 启动准备 -->
+  <div class="sec">
+    <div class="sec-title">1 · ⓪ 启动准备 <small>全部落盘到 runs/&lt;run_id&gt;/，保证可复盘</small></div>
+    <div class="row">
+      <div class="node c-prod"><b>建 run 目录</b><small><span class="code">runs/&lt;run_id&gt;/{skills, changelogs}</span></small></div>
+      <div class="arr"></div>
+      <div class="node c-prod"><b>评测集快照</b><small><span class="code">dataset_snapshot.jsonl</span> · 之后改评测集不影响本 run</small></div>
+      <div class="arr"></div>
+      <div class="node c-prod"><b>配置快照</b><small><span class="code">config_snapshot.json</span> · api_key 已掩码 ***</small></div>
+      <div class="arr"></div>
+      <div class="node c-trigger"><b>解析起始 SKILL</b><small>main / baseline / weak → 写入 <span class="code">skills/skill_v1.md</span></small></div>
+      <div class="arr"></div>
+      <div class="node c-guard"><b>⓪ 编译门槛（javac）</b><small>编译不通过的案例剔除，不计入 FP/FN；全失败则报错终止</small></div>
+    </div>
+  </div>
+  <div class="down"><span>进入 Round 1（v1）· 以下循环体 ×3</span></div>
+
+  <!-- 2 Round 循环体 -->
+  <div class="sec">
+    <div class="sec-title">2 · Round N 循环体 <small>N = 1, 2, 3 · 每轮每案例每阶段都是独立 claude -p 进程</small></div>
+    <div class="round-card">
+      <div class="round-head"><b>使用技能 <span id="rv">vN</span></b><small>轮次隔离：本轮所有阶段在 round_0N/ 各自的子工作区进行，SKILL 以快照装入 .claude/skills/</small></div>
+      <div class="stage3">
+        <div class="node c-review"><b>① 检视生成 · code-review</b><small>每案例独立 <span class="code">claude -p</span>（并发 N）→ 产出检视意见<br><span class="code">findings/case-x.json</span><br>trace：每案例全程 stream-json + session 费用/时长</small></div>
+        <div class="node c-score"><b>② 评分 · score-review</b><small>每案例独立 <span class="code">claude -p</span>：逐条判定 TP / FP<br>未被任何意见命中的标准答案 → FN<br>Python 只做确定性汇总，不掺模型判断</small></div>
+        <div class="node c-metric"><b>③ 指标汇总</b><small>P = TP/(TP+FP) · R = TP/(TP+FN) · F1<br>写 <span class="code">metrics.json</span>（含每案例明细）<br>更新「历史最佳」追踪（F1 不降则本轮技能成为新基准）</small></div>
+      </div>
+      <div class="down"></div>
+      <div class="decision"><b>④ 是否执行 SKILL 优化？</b>（按序判定，命中即止）</div>
+      <div class="branch3">
+        <div class="node b-warn"><b>护栏 A · 满分跳过</b><small>FP=0 且 FN=0 且链路无告警 → 跳过优化，下一轮沿用 vN（为改而改只会引入回归）</small></div>
+        <div class="node b-warn"><b>护栏 B · 末轮默认跳过</b><small>已是最后一轮且 <span class="code">optimize_last_round=false</span> → 不优化，闭环结束</small></div>
+        <div class="node c-opt" style="border-top:3px solid var(--opt)"><b>执行优化 · optimize-review</b><small>输入：错例包（FP/FN 案例含 diff）+ trace 链路诊断 + 上一轮 changelog → 单次 <span class="code">claude -p</span> 产出新 SKILL + changelog</small></div>
+      </div>
+      <div class="down"></div>
+      <div class="branch3">
+        <div class="node b-bad"><b>校验失败</b><small>frontmatter / name 不变 / 非空 / 与上一版不同 / JSON 契约字段 缺一不可 → 校验不过，下一轮沿用 vN</small></div>
+        <div class="node b-bad"><b>回退护栏</b><small>新版本在下一轮实测 F1 &lt; 历史最佳 → 优化产物丢弃，自动回退到历史最佳版本继续</small></div>
+        <div class="node b-ok"><b>采纳 → vN+1</b><small>写 <span class="code">skills/skill_vN+1.md</span> + <span class="code">changelogs/changelog_vN_to_vN+1.json</span> → Round N+1 使用新版本</small></div>
+      </div>
+    </div>
+  </div>
+  <div class="down"><span>Round N+1 以（可能已升级的）技能重复上述循环体，直至 N=3</span></div>
+
+  <!-- 3 三轮时间线 -->
+  <div class="sec">
+    <div class="sec-title">3 · 三轮全程示意 <small>护栏随时可能改写这条轨迹（如 R2 满分 → R3 沿用 v2）</small></div>
+    <div class="tl3">
+      <div class="r"><b>Round 1 · v1</b><small>起始 SKILL 全量评测<br>预期暴露 FP / FN → 有优化空间</small></div>
+      <div class="arr"></div>
+      <div class="r opt"><b>④ 优化</b><small>错例 + 链路诊断 → v2<br>changelog 记录改动原因</small></div>
+      <div class="arr"></div>
+      <div class="r"><b>Round 2 · v2</b><small>新版技能复评<br>与 R1 比对：FP 是否消除、FN 是否回退</small></div>
+      <div class="arr"></div>
+      <div class="r opt"><b>④ 优化</b><small>残余错例 → v3（或护栏拦截）</small></div>
+      <div class="arr"></div>
+      <div class="r"><b>Round 3 · v3</b><small>末轮默认不再优化<br>产出最终指标</small></div>
+    </div>
+  </div>
+  <div class="down"><span>运行汇总</span></div>
+
+  <!-- 4 汇总 -->
+  <div class="sec">
+    <div class="sec-title">4 · 汇总与查看</div>
+    <div class="row">
+      <div class="node c-prod"><b>全轮比对报告</b><small><span class="code">runs/&lt;run_id&gt;/report.json</span><br>每轮 P/R/F1/TP/FP/FN + 优化动作 + session 费用汇总</small></div>
+      <div class="arr"></div>
+      <div class="node c-trigger"><b><span class="code">python main.py</span> → Dashboard</b><small>结果分析：优化前后对比 · 轮次趋势 · SKILL 行级 diff<br>链路诊断：阶段资源消耗 · session 执行轨迹时间线</small></div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <div class="sec-title">5 · 本次运行的产物地图 <small>三层隔离：案例级独立进程 · 轮次级独立工作区 · run 级快照</small></div>
+    <div class="tree">
+runs/&lt;run_id&gt;/<br>
+├── dataset_snapshot.jsonl <span class="hl"># 评测集快照</span> · config_snapshot.json <span class="hl"># 配置快照(密钥***)</span><br>
+├── skills/skill_v1..vN.md <span class="hl"># 各轮实际使用的检视 SKILL 版本</span><br>
+├── changelogs/changelog_vN_to_vN+1.json <span class="hl"># 每次优化的改动说明</span><br>
+├── round_01/ · round_02/ · round_03/<br>
+│&nbsp;&nbsp;&nbsp;├── review_ws/ <span class="hl"># ① findings + traces/*.stream.jsonl + sessions(费用)</span><br>
+│&nbsp;&nbsp;&nbsp;├── score_ws/ <span class="hl"># ② 逐条 TP/FP 判定 + 未命中 GT 清单</span><br>
+│&nbsp;&nbsp;&nbsp;├── optimize_ws/ <span class="hl"># ④ 错例包 + 链路诊断 + 新版技能 + optimizer trace</span><br>
+│&nbsp;&nbsp;&nbsp;└── metrics.json <span class="hl"># ③ 本轮指标 + 每案例明细</span><br>
+└── report.json <span class="hl"># Dashboard 数据源（全轮比对）</span>
+    </div>
+  </div>
+
+  <div class="foot">SkillEvolve-CR · 执行链路示意图 · 依据 skillevolve/loop.py run_loop 真实实现绘制</div>
+</div>
+</body>
+</html>

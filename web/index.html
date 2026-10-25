@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkillEvolve-CR · 代码检视 SKILL 自优化闭环</title>
+<link rel="stylesheet" href="vendor/element-plus.css">
+<link rel="stylesheet" href="vendor/element-plus-dark.css">
+<link rel="stylesheet" href="style.css?v=20261025c">
+<script>
+  (function () {
+    var t = localStorage.getItem("sev-theme") || "light";
+    document.documentElement.dataset.theme = t;
+    if (t === "dark") document.documentElement.classList.add("dark");
+  })();
+</script>
+</head>
+<body>
+<div id="app" v-cloak>
+
+  <!-- ================= 顶栏 ================= -->
+  <header class="topbar">
+    <div class="logo">SE</div>
+    <div class="brand">
+      <h1>SkillEvolve-CR</h1>
+      <div class="sub">代码检视 SKILL 自优化闭环 · Claude Code headless</div>
+    </div>
+    <div class="spacer"></div>
+    <el-tag v-if="status && status.state==='running'" type="warning" effect="dark" class="mr8">
+      ◐ {{ status.run_id }} · R{{ status.round_current || '?' }}/{{ status.rounds_total || '?' }} {{ stageText }}
+    </el-tag>
+    <el-tag v-else-if="status && status.state==='finished'" type="success" class="mr8">✓ {{ status.run_id }} 已完成</el-tag>
+    <el-tag v-else-if="status && status.state==='error'" type="danger" class="mr8">✗ {{ status.run_id }} 异常</el-tag>
+    <el-select v-model="selectedRun" size="small" style="width:240px" placeholder="选择运行批次" @change="onRunChange">
+      <el-option v-for="r in runs" :key="r.run_id" :value="r.run_id" :label="runLabel(r)"></el-option>
+    </el-select>
+    <el-button-group class="ml8">
+      <el-button :icon="Refresh" @click="loadAll" title="刷新数据"></el-button>
+      <el-button :icon="theme === 'dark' ? Sunny : Moon" @click="toggleTheme" title="切换深浅主题"></el-button>
+    </el-button-group>
+  </header>
+
+  <main class="wrap">
+    <el-tabs v-model="tab" class="main-tabs">
+
+      <!-- ================= ① 评测集 ================= -->
+      <el-tab-pane name="evaluate">
+        <template #label><b>① 评测集</b></template>
+
+        <el-card shadow="never" class="blk">
+          <template #header><div class="card-head"><b>运行控制台</b><span class="muted small">按钮执行后自动跳转监控页</span></div></template>
+          <div class="launch-row">
+            <div class="launch-card">
+              <div class="lc-icon"><el-icon :size="22"><VideoPlay /></el-icon></div>
+              <div class="lc-body">
+                <b>单轮验证</b>
+                <small>1 轮 · 检视生成 → 评分 · 不优化 · 验证当前 SKILL 对所选案例的准确率 / 召回率</small>
+              </div>
+              <el-button type="primary" size="large" :disabled="running || selected.length===0"
+                         :loading="launching==='single'" @click="launch('single')">单轮验证</el-button>
+            </div>
+            <div class="launch-card">
+              <div class="lc-icon green"><el-icon :size="22"><RefreshRight></RefreshRight></el-icon></div>
+              <div class="lc-body">
+                <b>多轮优化</b>
+                <small>每轮：检视 → 评分 → 基于错例与 trace 优化 SKILL → 下一轮（起点相同、环境隔离），持续迭代至设定轮次</small>
+              </div>
+              <div class="rounds-pick">
+                <el-select v-model="rounds" style="width:88px" :disabled="running">
+                  <el-option v-for="n in [2,3,4,5]" :key="n" :value="n" :label="n + ' 轮'"></el-option>
+                </el-select>
+                <el-button type="success" size="large" :disabled="running || selected.length===0"
+                           :loading="launching==='multi'" @click="launch('multi')">多轮优化</el-button>
+              </div>
+            </div>
+          </div>
+          <div class="sel-summary">
+            <span>已选案例 <b>{{ selected.length }}</b> / {{ dataset.length }} 条</span>
+            <el-divider direction="vertical"></el-divider>
+            <span>预计调用 单轮 <b class="brand-num">{{ estSingle }}</b> 次 / 多轮 <b class="brand-num">{{ estMulti }}</b> 次</span>
+            <el-divider direction="vertical"></el-divider>
+            <el-button-group size="small">
+              <el-button size="small" @click="selectQuick('all')">全选</el-button>
+              <el-button size="small" @click="selectQuick('smoke')">冒烟 2 条</el-button>
+              <el-button size="small" @click="selectQuick('clean')">仅干净案例</el-button>
+            </el-button-group>
+            <el-divider direction="vertical"></el-divider>
+            <span class="small muted">起始 SKILL</span>
+            <el-select v-model="startSkill" size="small" style="width:168px" :disabled="running">
+              <el-option value="main" label="当前主 SKILL"></el-option>
+              <el-option value="baseline" label="初始版本 baseline"></el-option>
+              <el-option value="weak" label="弱化版本 weak · 演示"></el-option>
+            </el-select>
+            <el-button v-if="skillInfo && skillInfo.baseline_exists && !skillInfo.identical"
+                       size="small" type="warning" plain @click="restoreSkill">主 SKILL 回退初始版本</el-button>
+            <el-tag v-if="selected.length===0" type="danger" size="small" class="ml8">请先勾选案例</el-tag>
+          </div>
+        </el-card>
+
+        <el-card shadow="never" class="blk">
+          <template #header>
+            <div class="card-head">
+              <b>全量评测集（Java）</b>
+              <el-tag size="small" type="info">{{ dataset.length }} 条案例 · {{ gtTotal }} 条标准答案</el-tag>
+              <span class="muted small">勾选复选框或点击行选中案例 · 点击行首箭头展开 diff / 标准答案 / 完整源码</span>
+            </div>
+          </template>
+          <el-table ref="datasetTable" :data="dataset" row-key="id" @selection-change="onSelectionChange" @row-click="onRowClick" size="default">
+            <el-table-column type="selection" width="42"></el-table-column>
+            <el-table-column type="expand">
+              <template #default="{ row }">
+                <div class="expand-body">
+                  <div class="sec-title">diff</div>
+                  <pre class="diff" v-html="diffHtml(row.diff)"></pre>
+                  <div class="sec-title mt12">标准答案（{{ row.ground_truth.length }} 条）</div>
+                  <template v-if="row.ground_truth.length">
+                    <div v-for="g in row.ground_truth" :key="g.id" class="finding">
+                      <div class="head">
+                        <el-tag :type="g.severity==='high' ? 'danger' : (g.severity==='medium' ? 'warning' : 'info')" size="small">{{ g.severity }}</el-tag>
+                        <span class="mono muted small">{{ g.id }} · {{ g.category }}</span>
+                      </div>
+                      <div class="title">{{ g.title }}</div>
+                      <div class="muted small">{{ g.detail }}</div>
+                    </div>
+                  </template>
+                  <el-tag v-else type="success">干净案例：无标准答案，任何检视意见都计为 FP（误报）</el-tag>
+                  <div class="sec-title mt12">变更后完整源码</div>
+                  <pre>{{ row.source_code }}</pre>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="案例" width="105">
+              <template #default="{ row }"><span class="mono">{{ row.id }}</span></template>
+            </el-table-column>
+            <el-table-column label="文件" min-width="230">
+              <template #default="{ row }"><span class="mono small">{{ row.file_path }}</span></template>
+            </el-table-column>
+            <el-table-column prop="change_summary" label="变更说明" min-width="250"></el-table-column>
+            <el-table-column label="标准答案" width="150">
+              <template #default="{ row }">
+                <el-tag v-if="row.is_clean_case" type="success" size="small">干净案例 · 测 FP</el-tag>
+                <el-tag v-else size="small">{{ row.gt_count }} 条 GT</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-tab-pane>
+
+      <!-- ================= ② 运行监控 ================= -->
+      <el-tab-pane name="monitor" lazy>
+        <template #label><b>② 运行监控</b></template>
+
+        <el-card shadow="never" class="blk" v-loading="false">
+          <template #header><div class="card-head"><b>实时监控</b><span class="muted small">每 2 秒自动刷新</span></div></template>
+
+          <div v-if="!status || status.state==='idle'" class="center-empty">
+            <el-empty description="当前没有进行中的运行">
+              <el-button type="primary" @click="tab='evaluate'">前往「① 评测集」触发评测</el-button>
+            </el-empty>
+          </div>
+
+          <template v-else>
+            <div class="mon-head">
+              <span class="mono b">{{ status.run_id }}</span>
+              <el-tag :type="status.state==='running' ? 'warning' : (status.state==='finished' ? 'success' : 'danger')" size="small">
+                {{ status.state==='running' ? '◐ 运行中' : (status.state==='finished' ? '✓ 已完成' : '✗ 异常退出 exit ' + (status.exit_code ?? '?')) }}
+              </el-tag>
+              <el-tag size="small" type="info">轮次 {{ status.rounds_done }}<template v-if="status.rounds_total"> / {{ status.rounds_total }}</template></el-tag>
+              <el-tag v-if="status.stage && status.state==='running'" size="small">{{ stageText }}</el-tag>
+              <el-tag v-if="status.state==='running'" size="small" type="info">用时 {{ runningElapsed }}</el-tag>
+              <div class="spacer"></div>
+              <template v-if="status.state==='running'">
+                <el-button type="danger" plain :icon="SwitchButton" @click="stopRun">停止运行</el-button>
+              </template>
+              <template v-else-if="status.state==='finished'">
+                <el-button type="primary" @click="gotoResults">查看结果分析 →</el-button>
+              </template>
+            </div>
+
+            <el-steps :active="stageActive" align-center finish-status="success" class="mt16" process-status="process">
+              <el-step title="① 检视生成" description="headless 生成检视意见"></el-step>
+              <el-step title="② 评分" description="对比标准答案 → P / R / F1"></el-step>
+              <el-step title="③ SKILL 优化" :description="status.rounds_total===1 ? '单轮模式无此步' : '错例 + trace → 新版 SKILL'"></el-step>
+            </el-steps>
+
+            <el-progress :percentage="progressPct" :stroke-width="10" class="mt12"
+                         :status="status.state==='finished' ? 'success' : (status.state==='error' ? 'exception' : undefined)"></el-progress>
+
+            <div class="case-progress mt12" v-if="status.case_order && status.case_order.length">
+              <div class="sec-title">逐案例进度 · 当前 <span class="mono b" style="color:var(--el-color-primary)">{{ status.current_case || '…' }}</span></div>
+              <div class="case-chips">
+                <el-tag v-for="cid in status.case_order" :key="cid" size="large"
+                        :effect="cid===status.current_case && status.state==='running' ? 'dark' : 'plain'"
+                        :type="caseTagType(cid)">
+                  {{ cid }}
+                  <span class="cp-state">{{ caseStateText(cid) }}</span>
+                </el-tag>
+              </div>
+            </div>
+
+            <div class="sec-title mt12">实时日志</div>
+            <pre class="log" ref="logPre">{{ (status.log_tail || []).join('\n') || '（等待日志输出…）' }}</pre>
+          </template>
+        </el-card>
+
+        <el-card shadow="never" class="blk" v-if="runs.length">
+          <template #header><div class="card-head"><b>历史运行</b><span class="muted small">共 {{ runs.length }} 个批次 · 点击卡片查看结果</span></div></template>
+          <div class="run-strip">
+            <div v-for="r in runs" :key="r.run_id" class="run-chip" :class="{ active: r.run_id === selectedRun }"
+                 @click="viewRun(r.run_id)" title="查看该批次结果分析">
+              <div class="rc-top">
+                <span class="mono b">{{ r.run_id }}</span>
+                <span class="rc-dot" :class="r.final ? 'ok' : 'run'" :title="r.final ? '已完成' : '进行中'"></span>
+              </div>
+              <div class="rc-metrics">
+                <span>F1 <b>{{ fmt2((r.last_metrics || {}).f1) }}</b></span>
+                <span class="rc-sep">·</span><span>{{ r.rounds }} 轮</span>
+                <span class="rc-sep">·</span><span>{{ fmtDur(r.elapsed_sec) }}</span>
+                <span class="rc-sep">·</span><span>FP {{ (r.last_metrics || {}).fp ?? '-' }}</span>
+              </div>
+              <el-button link type="primary" size="small" class="rc-log" @click.stop="showRunLog(r.run_id)">日志</el-button>
+            </div>
+          </div>
+          <pre class="log" v-if="histLogVisible" style="max-height:420px">{{ histLogText || '（无日志）' }}</pre>
+        </el-card>
+      </el-tab-pane>
+
+      <!-- ================= ③ 结果分析 ================= -->
+      <el-tab-pane name="results" lazy>
+        <template #label><b>③ 结果分析</b></template>
+
+        <div v-if="!report || !report.rounds || !report.rounds.length" class="center-empty">
+          <el-empty description="尚无运行数据">
+            <el-button type="primary" @click="tab='evaluate'">前往「① 评测集」触发一次评测</el-button>
+          </el-empty>
+        </div>
+
+        <template v-else>
+          <div class="res-bar">
+            <span class="res-batch">批次 <span class="mono">{{ report.run_id }}</span></span>
+            <el-tag size="small" :type="report.final ? 'success' : 'warning'">{{ report.final ? '已完成' : '进行中' }}</el-tag>
+            <el-tag v-if="report.config.start_skill === 'baseline'" size="small" type="warning">起点 · 初始版本 baseline</el-tag>
+            <el-tag v-if="report.config.start_skill === 'weak'" size="small" type="danger">起点 · 弱化版本 weak</el-tag>
+            <el-tag v-if="cmp && cmp.optimized" type="success" effect="dark" size="small">✦ 优化已生效 · {{ cmp.first.skill_version }} → {{ cmp.last.skill_version }}</el-tag>
+            <el-tag v-else-if="cmp" type="info" size="small">{{ cmp.rounds.length }} 轮均用 {{ cmp.first.skill_version }} · 满分跳过优化</el-tag>
+            <el-tag size="small" type="info">{{ report.rounds.length }} 轮 · {{ report.dataset.length }} 案例 · GT {{ reportGtTotal }}</el-tag>
+            <el-tag size="small" type="info">用时 {{ fmtDur(report.elapsed_sec) }}</el-tag>
+            <el-tag size="small" type="info">费用 {{ totalCost ? fmtCost(totalCost) : '—' }}</el-tag>
+          </div>
+
+          <div class="res-duo">
+            <el-card shadow="never" class="blk">
+              <template #header><div class="card-head"><b>优化前后对比</b><span class="muted small">第一轮 → 最后一轮</span></div></template>
+              <div class="cmp-grid" v-if="cmp">
+                <div class="cmp-card" v-for="row in cmpRows" :key="row.label">
+                  <div class="cc-head">
+                    <el-tooltip :content="row.tip" placement="top" :show-after="200"><span class="tip-label">{{ row.label }} <span class="tip-ico">ⓘ</span></span></el-tooltip>
+                  </div>
+                  <div class="cc-body">
+                    <div class="cc-col">
+                      <span class="cc-v1" :class="{ bad: row.bad1 }">{{ row.v1 }}</span>
+                      <span class="cc-cap">R1</span>
+                    </div>
+                    <span class="cc-arrow">→</span>
+                    <div class="cc-col">
+                      <span class="cc-v2" :class="row.cls2">{{ row.v2 }}</span>
+                      <span class="cc-cap">末轮</span>
+                    </div>
+                  </div>
+                  <div class="cc-delta" :style="{ color: row.deltaColor }">{{ row.delta }}</div>
+                </div>
+              </div>
+              <div class="kpi-grid" v-else>
+                <div class="kpi-card" v-for="mc in summaryMetrics" :key="mc.label">
+                  <el-tooltip :content="mc.tip" placement="top" :show-after="200">
+                    <div class="muted small tip-label">{{ mc.label }} <span class="tip-ico">ⓘ</span></div>
+                  </el-tooltip>
+                  <div class="metric-value">{{ mc.value }}</div>
+                  <div class="small" :style="{ color: mc.deltaColor }">{{ mc.delta }}</div>
+                </div>
+              </div>
+            </el-card>
+            <el-card shadow="never" class="blk">
+              <template #header><div class="card-head"><b>轮次趋势</b><span class="muted small">上：P / R / F1 折线 · 下：TP / FP / FN 构成（悬浮看数值）</span></div></template>
+              <div v-html="trendHtml"></div>
+              <el-table :data="roundRows" size="small" class="mt12">
+                <el-table-column label="轮次" width="58"><template #default="{row}"><b>R{{ row.round }}</b></template></el-table-column>
+                <el-table-column label="技能" width="62"><template #default="{row}"><span class="mono">{{ row.skill }}</span></template></el-table-column>
+                <el-table-column label="Precision" width="92" align="center"><template #default="{row}">{{ row.p }}</template></el-table-column>
+                <el-table-column label="Recall" width="84" align="center"><template #default="{row}">{{ row.r }}</template></el-table-column>
+                <el-table-column label="F1" width="70" align="center"><template #default="{row}"><b>{{ row.f1 }}</b></template></el-table-column>
+                <el-table-column label="TP / FP / FN" width="112" align="center">
+                  <template #default="{row}"><span :class="{ 'bad-num': row.fp || row.fn }">{{ row.tfn }}</span></template>
+                </el-table-column>
+                <el-table-column label="本轮优化动作" min-width="170">
+                  <template #default="{row}"><el-tag size="small" :type="row.atype">{{ row.action }}</el-tag></template>
+                </el-table-column>
+              </el-table>
+            </el-card>
+          </div>
+
+          <el-card shadow="never" class="blk" v-if="report && report.skill_versions">
+            <template #header>
+              <div class="card-head">
+                <b>SKILL 优化对照</b>
+                <el-radio-group v-if="diffs.length" v-model="skillDiffIdx" size="small">
+                  <el-radio-button v-for="(d, i) in diffs" :key="i" :value="i">{{ d.from }} → {{ d.to }}</el-radio-button>
+                </el-radio-group>
+                <span class="muted small">左：优化前 · 右：优化后</span>
+              </div>
+            </template>
+            <div class="sk-duo" v-if="skRows">
+              <div class="sk-col">
+                <div class="sec-title">优化前 SKILL · {{ versionPair.from }}<el-tag size="small" type="danger" effect="plain" class="ml8">-{{ skRows.del }} 行</el-tag></div>
+                <div class="skill-lines">
+                  <div v-for="(row, idx) in skRows.rows" :key="'l' + idx" class="dl" :class="'dl-' + row.lt"><span class="dlno">{{ row.lno }}</span><span class="dltx">{{ row.l }}</span></div>
+                </div>
+              </div>
+              <div class="sk-col">
+                <div class="sec-title">优化后 SKILL · {{ versionPair.to }}<el-tag v-if="cmp && cmp.optimized" type="success" size="small" class="ml8">✦ 已生效</el-tag><el-tag size="small" type="success" effect="plain" class="ml8">+{{ skRows.add }} 行</el-tag></div>
+                <div class="skill-lines">
+                  <div v-for="(row, idx) in skRows.rows" :key="'r' + idx" class="dl" :class="'dl-' + row.rt"><span class="dlno">{{ row.rno }}</span><span class="dltx">{{ row.r }}</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="sk-duo single" v-else>
+              <div class="sk-col">
+                <div class="sec-title">当前 SKILL · {{ versionPair.from }}<el-tag type="info" size="small" class="ml8">本批次未产生新版本</el-tag></div>
+                <pre class="skill-pre">{{ versionPair.oldText || '（无内容）' }}</pre>
+              </div>
+            </div>
+            <el-collapse class="diff-collapse mt12" v-if="diffs.length">
+              <el-collapse-item name="changelog">
+                <template #title>
+                  <span class="small muted">为什么这么改 · changelog（{{ currentDiff.changelog?.changes?.length || 0 }} 条 · 点击展开）</span>
+                </template>
+                <div v-html="changelogHtml"></div>
+              </el-collapse-item>
+              <el-collapse-item name="diff">
+                <template #title>
+                  <span class="small muted">SKILL.md 完整 diff（{{ versionPair.from }} → {{ versionPair.to }}<template v-if="skRows"> · <span style="color:var(--el-color-danger)">-{{ skRows.del }}</span> / <span style="color:var(--el-color-success)">+{{ skRows.add }}</span> 行</template> · 点击展开）</span>
+                </template>
+                <pre class="diff" v-html="diffHtml(currentDiff.unified_diff)"></pre>
+              </el-collapse-item>
+            </el-collapse>
+          </el-card>
+
+        </template>
+      </el-tab-pane>
+
+      <!-- ================= ④ 链路诊断 ================= -->
+      <el-tab-pane name="diag" lazy>
+        <template #label><b>④ 链路诊断</b></template>
+
+        <div v-if="!report || !report.rounds || !report.rounds.length" class="center-empty">
+          <el-empty description="尚无运行数据">
+            <el-button type="primary" @click="tab='evaluate'">前往「① 评测集」触发一次评测</el-button>
+          </el-empty>
+        </div>
+
+        <template v-else>
+          <el-card shadow="never" class="blk">
+            <template #header>
+              <div class="card-head">
+                <b>资源消耗总览</b>
+                <el-select v-model="roundNo" size="small" style="width:190px">
+                  <el-option v-for="r in report.rounds" :key="r.round" :value="r.round"
+                             :label="'Round ' + r.round + '（' + r.skill_version + '）'"></el-option>
+                </el-select>
+                <span class="muted small">所选轮次全部 session 汇总 · 输入 Token 含缓存读写</span>
+              </div>
+            </template>
+            <div class="res-stat-grid">
+              <div class="res-stat">
+                <div class="rs-label">总用时（session 汇总）</div>
+                <div class="rs-val">{{ fmtMs(resStats.dur) }}</div>
+              </div>
+              <div class="res-stat">
+                <div class="rs-label">总费用</div>
+                <div class="rs-val">{{ resStats.cost ? "$" + resStats.cost.toFixed(4) : "—" }}</div>
+              </div>
+              <div class="res-stat">
+                <div class="rs-label">输入 Token</div>
+                <div class="rs-val">{{ fmtTok(resStats.inTok) }}</div>
+                <div class="rs-sub" v-if="resStats.hit != null">缓存命中 {{ resStats.hit }}%</div>
+              </div>
+              <div class="res-stat">
+                <div class="rs-label">输出 Token</div>
+                <div class="rs-val">{{ fmtTok(resStats.outTok) }}</div>
+              </div>
+              <div class="res-stat">
+                <div class="rs-label">工具调用</div>
+                <div class="rs-val">{{ resStats.calls }}</div>
+              </div>
+              <div class="res-stat">
+                <div class="rs-label">Session 数</div>
+                <div class="rs-val">{{ resStats.sessions }}</div>
+              </div>
+            </div>
+            <el-table :data="stageMatrix" size="small" class="mt12">
+              <el-table-column label="阶段" width="100"><template #default="{row}"><b>{{ row.label }}</b></template></el-table-column>
+              <el-table-column label="Session" width="86" align="center"><template #default="{row}">{{ row.n }}</template></el-table-column>
+              <el-table-column label="总用时" width="96" align="center"><template #default="{row}">{{ fmtMs(row.dur) }}</template></el-table-column>
+              <el-table-column label="费用" width="92" align="center"><template #default="{row}">{{ row.cost ? "$" + row.cost.toFixed(4) : "—" }}</template></el-table-column>
+              <el-table-column label="输入 Token" width="104" align="center"><template #default="{row}">{{ fmtTok(row.inTok) }}</template></el-table-column>
+              <el-table-column label="输出 Token" width="104" align="center"><template #default="{row}">{{ fmtTok(row.outTok) }}</template></el-table-column>
+              <el-table-column label="缓存命中" width="92" align="center"><template #default="{row}">{{ row.hit != null ? row.hit + "%" : "—" }}</template></el-table-column>
+              <el-table-column label="工具调用" min-width="92" align="center"><template #default="{row}">{{ row.calls }}</template></el-table-column>
+            </el-table>
+          </el-card>
+
+          <el-card shadow="never" class="blk">
+            <template #header>
+              <div class="card-head">
+                <b>链路问题 · Session 明细</b>
+                <el-tag size="small" :type="loadPct(roundTrace.stage_summary,'review')>=100 ? 'success' : (loadPct(roundTrace.stage_summary,'review')>=50 ? 'warning':'danger')">检视加载 {{ loadPct(roundTrace.stage_summary,'review') }}%</el-tag>
+                <el-tag size="small" :type="loadPct(roundTrace.stage_summary,'scoring')>=100 ? 'success' : (loadPct(roundTrace.stage_summary,'scoring')>=50 ? 'warning':'danger')">评分加载 {{ loadPct(roundTrace.stage_summary,'scoring') }}%</el-tag>
+                <el-tag size="small" type="info">平均轮次 {{ avgTurns(roundTrace.stage_summary,'review') }}</el-tag>
+                <el-tag size="small" :type="issueCount ? 'danger' : 'success'">{{ issueCount ? '问题 ' + issueCount : '✓ 链路健康 · 无告警' }}</el-tag>
+              </div>
+            </template>
+            <el-table v-if="traceIssues.length" :data="traceIssues" size="small" class="mb12">
+              <el-table-column label="阶段" width="90"><template #default="{row}">{{ row.stage }}</template></el-table-column>
+              <el-table-column label="案例" width="110"><template #default="{row}"><span class="mono">{{ row.case_id || '-' }}</span></template></el-table-column>
+              <el-table-column label="问题" min-width="380">
+                <template #default="{row}">{{ row.issue }}<div v-if="row.detail" class="mono muted small">{{ row.detail }}</div></template>
+              </el-table-column>
+              <el-table-column label="级别" width="90">
+                <template #default="{row}"><el-tag size="small" :type="row.severity==='high' ? 'danger':'warning'">{{ row.severity }}</el-tag></template>
+              </el-table-column>
+            </el-table>
+            <el-table :data="sessionRows" size="small">
+              <el-table-column label="案例" width="105"><template #default="{row}"><span class="mono">{{ row.cid }}</span></template></el-table-column>
+              <el-table-column label="阶段" width="80"><template #default="{row}">{{ row.stage }}</template></el-table-column>
+              <el-table-column label="session_id" min-width="150"><template #default="{row}"><span class="mono muted small">{{ row.sid }}</span></template></el-table-column>
+              <el-table-column label="轮次" width="70"><template #default="{row}">{{ row.turns }}</template></el-table-column>
+              <el-table-column label="时长" width="80"><template #default="{row}">{{ row.dur }}</template></el-table-column>
+              <el-table-column label="费用" width="90"><template #default="{row}">{{ row.cost }}</template></el-table-column>
+              <el-table-column label="输入 Tok" width="90"><template #default="{row}"><span class="mono">{{ fmtTok(row.inTok) }}</span></template></el-table-column>
+              <el-table-column label="输出 Tok" width="90"><template #default="{row}"><span class="mono">{{ fmtTok(row.outTok) }}</span></template></el-table-column>
+              <el-table-column label="技能加载" width="90">
+                <template #default="{row}"><el-tag size="small" :type="row.loaded ? 'success':'danger'">{{ row.loaded ? '是':'否' }}</el-tag></template>
+              </el-table-column>
+              <el-table-column label="工具调用" width="90"><template #default="{row}">{{ row.calls }}</template></el-table-column>
+              <el-table-column label="执行轨迹" width="100">
+                <template #default="{row}"><el-button link type="primary" size="small" @click="openSessionTrace(row)">逐步查看</el-button></template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+        </template>
+      </el-tab-pane>
+    </el-tabs>
+
+    <!-- session 执行轨迹抽屉（Langfuse 风格时间线） -->
+    <el-drawer v-model="traceDrawer" :title="'执行轨迹 · ' + sessionTraceKey" size="56%" destroy-on-close>
+      <div v-loading="sessionTraceLoading">
+        <template v-if="sessionTrace && !sessionTrace.error">
+          <div class="chip-row mb12">
+            <el-tag size="small" type="info">模型 {{ sessionTrace.model || '—' }}</el-tag>
+            <el-tag size="small" type="info">原始事件 {{ sessionTrace.total_events }}</el-tag>
+            <el-tag size="small" type="info">有效步骤 {{ sessionTrace.steps.length }}</el-tag>
+            <el-tag v-if="sessionTrace.result" size="small">
+              总时长 {{ fmtMs(sessionTrace.result.duration_ms) }} · {{ sessionTrace.result.num_turns }} 轮 · ${{ ((sessionTrace.result.cost_usd ?? 0)).toFixed(4) }}
+            </el-tag>
+          </div>
+          <div class="mono muted small mb12">{{ sessionTrace.session_id }}</div>
+          <div class="tl">
+            <div v-for="(s, i) in sessionTrace.steps" :key="i" class="tl-step" :class="'k-' + s.kind">
+              <div class="tl-dot"></div>
+              <div class="tl-main">
+                <div class="tl-head">
+                  <span class="tl-kind">{{ kindLabel(s) }}</span>
+                  <span v-if="s.name" class="tl-tool mono">{{ s.name }}</span>
+                  <span v-if="s.gap_ms != null" class="muted small">+{{ fmtMs(s.gap_ms) }}</span>
+                  <span v-if="s.dur_ms != null" class="muted small">耗时 {{ fmtMs(s.dur_ms) }}</span>
+                </div>
+                <div v-if="s.input" class="tl-io mono">{{ s.input }}</div>
+                <pre v-if="s.text" class="tl-text">{{ s.text }}</pre>
+                <div v-if="s.result" class="tl-io mono" :class="{ err: s.ok === false }">→ {{ s.result }}</div>
+                <div v-if="s.detail" class="muted small">{{ s.detail }}</div>
+              </div>
+            </div>
+          </div>
+        </template>
+        <el-empty v-else-if="!sessionTraceLoading" :description="(sessionTrace && sessionTrace.error) || '无轨迹数据'"></el-empty>
+      </div>
+    </el-drawer>
+  </main>
+
+  <footer class="page">SkillEvolve-CR · 零依赖 Python 后端 + Vue3/Element Plus 前端 · 数据目录 runs/</footer>
+</div>
+
+<script src="vendor/vue.global.prod.js"></script>
+<script src="vendor/element-plus.full.min.js"></script>
+<script src="vendor/element-plus-zh-cn.min.js"></script>
+<script src="vendor/element-plus-icons.iife.min.js"></script>
+<script src="app.js?v=20261025c"></script>
+</body>
+</html>

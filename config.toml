@@ -1,0 +1,27 @@
+# ============================================================
+# SkillEvolve-CR 配置文件（流程控制）
+# 代码检视 SKILL 自优化闭环平台
+# ------------------------------------------------------------
+# 模型 / API Key / 提示词等三阶段 CLI 能力配置已迁移至 config.yaml
+# （claude 全局默认 + stages.review / stages.score / stages.optimize 阶段级覆盖）
+# ============================================================
+
+[loop]
+# 优化迭代轮次（可配置）：每轮 = 检视生成 -> 评分 -> (可选)SKILL优化 -> 下一轮
+rounds = 3
+# 每个阶段并行执行多少个案例
+concurrency = 3
+# 最后一轮评测完成后是否仍执行一次 SKILL 优化（默认 false：最后一轮的优化没有下一轮评测验证）
+optimize_last_round = false
+# 参与评测的案例，留空 = 全部案例；示例: ["case-001", "case-009"]
+cases = []
+
+[paths]
+# 评测集路径已在 config.yaml 的 dataset.path 配置（支持 presets 预设名整体切换）
+skills_dir = "skills"
+runs_dir = "runs"
+web_dir = "web"
+
+[report]
+# 生成 report.json 后是否自动刷新（每轮结束都会写一次中间报告，崩溃可恢复）
+progressive = true

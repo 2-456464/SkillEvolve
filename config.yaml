@@ -1,0 +1,89 @@
+# ============================================================
+# SkillEvolve-CR 三阶段 CLI 配置（阶段① 检视 / 阶段② 评分 / 阶段③ 优化）
+# ------------------------------------------------------------
+# 结构说明：
+#   claude          全局默认值，所有阶段共享的兜底配置
+#   stages.<name>   阶段级配置；留空或省略的字段自动继承 claude 全局值
+#
+# 每个阶段可独立配置的 CLI 能力：
+#   model             模型名（留空 = claude CLI 当前默认模型）
+#   api_key           API 密钥        -> 注入环境变量 ANTHROPIC_API_KEY
+#   auth_token        Bearer 令牌     -> 注入环境变量 ANTHROPIC_AUTH_TOKEN（部分网关使用）
+#   base_url          API 端点        -> 注入环境变量 ANTHROPIC_BASE_URL
+#   max_turns         headless 会话最大轮次
+#   timeout_seconds   单会话超时（秒）
+#   retries           输出文件缺失/格式错误时的重试次数
+#   permission_mode   权限模式：default / acceptEdits / bypassPermissions
+#   allowed_tools     工具白名单
+#
+# 提示词占位符（render 时按名称替换，其余花括号内容原样保留）：
+#   review / score    {case_id}
+#   optimize          {prev_line}  上一轮优化说明行（无上一轮时替换为空）
+#
+# 注意：填写真实 api_key / auth_token 后请勿将本文件提交到公共仓库。
+# ============================================================
+
+claude:
+  model: ""                    # 留空 = claude CLI 当前默认模型；也可填模型名或网关别名
+  api_key: ""                  # 留空 = 沿用本机 claude CLI 已有登录凭据
+  auth_token: ""
+  base_url: ""                 # 例：https://api.deepseek.com/anthropic
+  max_turns: 40
+  timeout_seconds: 900
+  retries: 1
+  permission_mode: default
+  allowed_tools: [Read, Grep, Glob, Write, Skill, SlashCommand, TodoWrite]
+
+stages:
+  # ── 阶段① 检视生成（code-review）────────────────────────
+  review:
+    prompt: |
+      请使用 code-review 技能完成一次代码检视任务。
+      - 案例文件：cases/{case_id}.json（包含 diff、变更后完整源码 source_code、语言、变更说明）
+      - 请严格按照 code-review 技能中定义的检视流程、检查单与输出要求执行。
+      - 完成后，将检视结果 JSON 写入文件：findings/{case_id}.json（UTF-8，无 BOM）。
+    # 阶段级覆盖示例（取消注释即生效）：
+    # model: ""
+    # api_key: ""
+    # auth_token: ""
+    # base_url: ""
+    # max_turns: 40
+    # timeout_seconds: 900
+    # retries: 1
+    # permission_mode: default
+    # allowed_tools: [Read, Grep, Glob, Write, Skill]
+
+  # ── 阶段② 评分（score-review）──────────────────────────
+  score:
+    prompt: |
+      请使用 score-review 技能对代码检视结果进行评分。
+      - 案例文件（含标准答案 ground_truth、diff、源码）：cases/{case_id}.json
+      - 待评检视结果：findings/{case_id}.json
+      - 请严格按照 score-review 技能中的匹配判定规则逐条判定 TP/FP，并找出未命中的 GT。
+      - 完成后，将评分结果 JSON 写入文件：scores/{case_id}.json（UTF-8，无 BOM）。
+
+  # ── 阶段③ SKILL 优化（optimize-review）─────────────────
+  # 注意：{prev_line} 与下一行之间的内联拼接为有意为之（替换后无多余空行），勿改为独立行
+  optimize:
+    prompt: |
+      请使用 optimize-review 技能改进 code-review 代码检视技能。
+      - 当前待优化技能：skill_current/SKILL.md
+      - 错例分析包（FP/FN，含 diff 与原因）：analysis/errors.json
+      - 链路诊断（技能加载/输出格式/工具报错等）：analysis/trace_report.json
+      - 本轮指标与每案例明细：analysis/metrics.json
+      {prev_line}- 请先通读当前技能与错例，再按 optimize-review 技能中的优化方法执行。
+      - 将完整的新版 SKILL.md 写入：optimized/SKILL.md
+      - 将变更说明 JSON 写入：optimized/changelog.json
+
+# ============================================================
+# 评测集：替换为个人定制评测集只需修改 path（JSONL 格式，每行一条案例：
+# id / language / file_path / diff / source_code / ground_truth）
+# 支持绝对路径或相对项目根路径；validate / run / Dashboard 评测集页均从此读取
+# ============================================================
+dataset:
+  path: "dataset/eval_set.jsonl"
+  # 预设注册表：后续对接多个评测集时在此登记，path 直接填预设名即可整体切换
+  # presets:
+  #   my-cr-set: "dataset/my_cases.jsonl"
+  #   regression: "E:/data/regression_set.jsonl"
+  presets: {}
